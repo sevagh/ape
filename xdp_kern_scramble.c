@@ -10,11 +10,18 @@
  * 0 = UDP
  * 1 = total
  */
-struct bpf_map_def SEC("maps") drop_count = {
+struct bpf_map_def SEC("maps") scramble_count = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(int),
 	.value_size = sizeof(long),
 	.max_entries = 2,
+};
+
+struct bpf_map_def SEC("maps") scramble_xsks_map = {
+	.type = BPF_MAP_TYPE_XSKMAP,
+	.key_size = sizeof(int),
+	.value_size = sizeof(int),
+	.max_entries = 64,
 };
 
 /* LLVM maps __sync_fetch_and_add() as a built-in function to the BPF atomic add
@@ -27,13 +34,14 @@ struct bpf_map_def SEC("maps") drop_count = {
 #define UDP_TABLE_KEY 0
 #define TOTAL_TABLE_KEY 1
 
-SEC("xdp_ape_drop")
-int xdp_ape_drop_func(struct xdp_md *ctx)
+SEC("xdp_ape_scramble")
+int xdp_ape_scramble_func(struct xdp_md *ctx)
 {
-	int eth_type, ip_type, map_key;
+	int eth_type, ip_type, map_key, index;
 	struct ethhdr *eth;
 	struct iphdr *iphdr;
 	struct ipv6hdr *ipv6hdr;
+	struct udphdr *udphdr;
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct hdr_cursor nh = { .pos = data };
@@ -56,8 +64,6 @@ int xdp_ape_drop_func(struct xdp_md *ctx)
 		return XDP_PASS;
 
 #ifdef UDP_PORT
-	struct udphdr *udphdr;
-
 	// don't mess with ports outside our purview, if specified
 	if (parse_udphdr(&nh, data_end, &udphdr) < 0)
 		return XDP_ABORTED;
@@ -65,18 +71,21 @@ int xdp_ape_drop_func(struct xdp_md *ctx)
 		return XDP_PASS;
 #endif /* UDP_PORT */
 
-	// if we're here, it's a UDP packet with dst port we care about
+	//if we're here, it's a UDP packet with dst port we care about
 	map_key = TOTAL_TABLE_KEY;
-	value = bpf_map_lookup_elem(&drop_count, &map_key);
+	value = bpf_map_lookup_elem(&scramble_count, &map_key);
 	if (value)
 		lock_xadd(value, 1);
 
-	if ((bpf_get_prandom_u32() % 100) < UDP_DROP_PROB) {
+	if ((bpf_get_prandom_u32() % 100) < UDP_SCRAMBLE_PROB) {
 		map_key = UDP_TABLE_KEY;
-		value = bpf_map_lookup_elem(&drop_count, &map_key);
+		value = bpf_map_lookup_elem(&scramble_count, &map_key);
 		if (value)
 			lock_xadd(value, 1);
-		return XDP_DROP;
+
+		index = ctx->rx_queue_index;
+		if (bpf_map_lookup_elem(&scramble_xsks_map, &index))
+			return bpf_redirect_map(&scramble_xsks_map, index, 0);
 	}
 
 	return XDP_PASS;

@@ -1,19 +1,32 @@
 BPF_MAKEFILE:="Makefile.bpf"
 
-kern_clean:
-	-rm xdp_kern_drop.ll
-	-rm xdp_kern_drop.o
+all: user_drop user_scramble
+
+kern_drop_clean:
+	-rm xdp_kern_drop.ll xdp_kern_drop.o
 
 kern_drop:
 	$(MAKE) -f $(BPF_MAKEFILE) xdp_kern_drop.o
 
-all: user
+kern_scramble_clean:
+	-rm xdp_kern_scramble.ll xdp_kern_scramble.o
 
-user_clean:
+kern_scramble:
+	$(MAKE) -f $(BPF_MAKEFILE) xdp_kern_scramble.o
+
+user_drop_clean:
 	-rm xdp_user_drop
 
-user:
+user_drop:
 	$(MAKE) -f $(BPF_MAKEFILE) xdp_user_drop
+
+user_scramble_clean:
+	-rm xdp_user_scramble
+
+user_scramble:
+	$(MAKE) -f $(BPF_MAKEFILE) xdp_user_scramble
+
+clean: user_drop_clean user_scramble_clean
 
 fmt:
 	-clang-format -i *.h
@@ -21,4 +34,4 @@ fmt:
 	black ape.py
 
 
-.PHONY: user_clean kern_clean user kern
+.PHONY: user_drop_clean kern_drop_clean user_drop kern_drop kern_scramble_clean kern_scramble

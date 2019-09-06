@@ -1,3 +1,4 @@
 *.o
 *.ll
 xdp_user_drop
+xdp_user_scramble
