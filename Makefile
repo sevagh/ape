@@ -1,6 +1,8 @@
 BPF_MAKEFILE:="Makefile.bpf"
 
-all: user_drop user_scramble
+all:
+	$(MAKE) user_drop
+	$(MAKE) user_scramble
 
 kern_drop_clean:
 	-rm xdp_kern_drop.ll xdp_kern_drop.o
@@ -26,7 +28,9 @@ user_scramble_clean:
 user_scramble:
 	$(MAKE) -f $(BPF_MAKEFILE) xdp_user_scramble
 
-clean: user_drop_clean user_scramble_clean
+clean:
+	$(MAKE) user_drop_clean
+	$(MAKE) user_scramble_clean
 
 fmt:
 	-clang-format -i *.h

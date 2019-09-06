@@ -25,9 +25,9 @@
 #include <linux/ipv6.h>
 #include <linux/icmpv6.h>
 
-#include "xdp-tutorial/common/common_params.h"
-#include "xdp-tutorial/common/common_user_bpf_xdp.h"
-#include "xdp-tutorial/common/common_libbpf.h"
+#include "common/common_params.h"
+#include "common/common_user_bpf_xdp.h"
+#include "common/common_libbpf.h"
 
 #define NUM_FRAMES 4096
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
@@ -41,14 +41,6 @@ struct xsk_umem_info {
 	void *buffer;
 };
 
-struct stats_record {
-	uint64_t timestamp;
-	uint64_t rx_packets;
-	uint64_t rx_bytes;
-	uint64_t tx_packets;
-	uint64_t tx_bytes;
-};
-
 struct xsk_socket_info {
 	struct xsk_ring_cons rx;
 	struct xsk_ring_prod tx;
@@ -59,9 +51,6 @@ struct xsk_socket_info {
 	uint32_t umem_frame_free;
 
 	uint32_t outstanding_tx;
-
-	struct stats_record stats;
-	struct stats_record prev_stats;
 };
 
 static inline __u32 xsk_ring_prod__free(struct xsk_ring_prod *r)
@@ -105,6 +94,8 @@ static const struct option_wrapper long_options[] = {
 
 	{ { "unload", no_argument, NULL, 'U' },
 	  "Unload XDP program instead of loading" },
+
+	{ { "reuse-maps", no_argument, NULL, 'M' }, "Reuse pinned maps" },
 
 	{ { "quiet", no_argument, NULL, 'q' }, "Quiet mode (no output)" },
 
@@ -184,6 +175,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	xsk_cfg.libbpf_flags = 0;
 	xsk_cfg.xdp_flags = cfg->xdp_flags;
 	xsk_cfg.bind_flags = cfg->xsk_bind_flags;
+
 	ret = xsk_socket__create(&xsk_info->xsk, cfg->ifname, cfg->xsk_if_queue,
 				 umem->umem, &xsk_info->rx, &xsk_info->tx,
 				 &xsk_cfg);
@@ -208,6 +200,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 
 	if (ret != XSK_RING_PROD__DEFAULT_NUM_DESCS)
 		goto error_exit;
+
 
 	for (i = 0; i < XSK_RING_PROD__DEFAULT_NUM_DESCS; i++)
 		*xsk_ring_prod__fill_addr(&xsk_info->umem->fq, idx++) =
@@ -323,8 +316,6 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 		xsk_ring_prod__submit(&xsk->tx, 1);
 		xsk->outstanding_tx++;
 
-		xsk->stats.tx_bytes += len;
-		xsk->stats.tx_packets++;
 		return true;
 	}
 
@@ -368,12 +359,9 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 
 		if (!process_packet(xsk, addr, len))
 			xsk_free_umem_frame(xsk, addr);
-
-		xsk->stats.rx_bytes += len;
 	}
 
 	xsk_ring_cons__release(&xsk->rx, rcvd);
-	xsk->stats.rx_packets += rcvd;
 
 	/* Do we need to wake up the kernel for transmission */
 	complete_tx(xsk);
@@ -399,94 +387,57 @@ static void rx_and_process(struct config *cfg,
 	}
 }
 
-#define NANOSEC_PER_SEC 1000000000 /* 10^9 */
-static uint64_t gettime(void)
-{
-	struct timespec t;
-	int res;
-
-	res = clock_gettime(CLOCK_MONOTONIC, &t);
-	if (res < 0) {
-		fprintf(stderr, "Error with gettimeofday! (%i)\n", res);
-		exit(EXIT_FAIL);
-	}
-	return (uint64_t)t.tv_sec * NANOSEC_PER_SEC + t.tv_nsec;
-}
-
-static double calc_period(struct stats_record *r, struct stats_record *p)
-{
-	double period_ = 0;
-	__u64 period = 0;
-
-	period = r->timestamp - p->timestamp;
-	if (period > 0)
-		period_ = ((double)period / NANOSEC_PER_SEC);
-
-	return period_;
-}
-
-static void stats_print(struct stats_record *stats_rec,
-			struct stats_record *stats_prev)
-{
-	uint64_t packets, bytes;
-	double period;
-	double pps; /* packets per sec */
-	double bps; /* bits per sec */
-
-	char *fmt = "%-12s %'11lld pkts (%'10.0f pps)"
-		    " %'11lld Kbytes (%'6.0f Mbits/s)"
-		    " period:%f\n";
-
-	period = calc_period(stats_rec, stats_prev);
-	if (period == 0)
-		period = 1;
-
-	packets = stats_rec->rx_packets - stats_prev->rx_packets;
-	pps = packets / period;
-
-	bytes = stats_rec->rx_bytes - stats_prev->rx_bytes;
-	bps = (bytes * 8) / period / 1000000;
-
-	printf(fmt, "AF_XDP RX:", stats_rec->rx_packets, pps,
-	       stats_rec->rx_bytes / 1000, bps, period);
-
-	packets = stats_rec->tx_packets - stats_prev->tx_packets;
-	pps = packets / period;
-
-	bytes = stats_rec->tx_bytes - stats_prev->tx_bytes;
-	bps = (bytes * 8) / period / 1000000;
-
-	printf(fmt, "       TX:", stats_rec->tx_packets, pps,
-	       stats_rec->tx_bytes / 1000, bps, period);
-
-	printf("\n");
-}
-
-static void *stats_poll(void *arg)
-{
-	unsigned int interval = 2;
-	struct xsk_socket_info *xsk = arg;
-	static struct stats_record previous_stats = { 0 };
-
-	previous_stats.timestamp = gettime();
-
-	/* Trick to pretty printf with thousands separators use %' */
-	setlocale(LC_NUMERIC, "en_US");
-
-	while (!global_exit) {
-		sleep(interval);
-		xsk->stats.timestamp = gettime();
-		stats_print(&xsk->stats, &previous_stats);
-		previous_stats = xsk->stats;
-	}
-	return NULL;
-}
-
 static void exit_application(int signal)
 {
 	signal = signal;
 	global_exit = true;
 }
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+const char *pin_basedir = "/sys/fs/bpf";
+const char *map_name = "scramble_count";
+
+/* Pinning maps under /sys/fs/bpf in subdir */
+int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
+{
+	char map_filename[PATH_MAX];
+	int err, len;
+
+	len = snprintf(map_filename, PATH_MAX, "%s/%s/%s", pin_basedir,
+		       cfg->ifname, map_name);
+	if (len < 0) {
+		fprintf(stderr, "ERR: creating map_name\n");
+		return EXIT_FAIL_OPTION;
+	}
+
+	/* Existing/previous XDP prog might not have cleaned up */
+	if (access(map_filename, F_OK) != -1) {
+		if (verbose)
+			printf(" - Unpinning (remove) prev maps in %s/\n",
+			       cfg->pin_dir);
+
+		/* Basically calls unlink(3) on map_filename */
+		err = bpf_object__unpin_maps(bpf_obj, cfg->pin_dir);
+		if (err) {
+			fprintf(stderr, "ERR: UNpinning maps in %s\n",
+				cfg->pin_dir);
+			return EXIT_FAIL_BPF;
+		}
+	}
+	if (verbose)
+		printf(" - Pinning maps in %s/\n", cfg->pin_dir);
+
+	/* This will pin all maps in our bpf_object */
+	err = bpf_object__pin_maps(bpf_obj, cfg->pin_dir);
+	if (err)
+		return EXIT_FAIL_BPF;
+
+	return 0;
+}
+
 
 int main(int argc, char **argv)
 {
@@ -497,7 +448,6 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	int ret;
 	int xsks_map_fd;
 	void *packet_buffer;
 	uint64_t packet_buffer_size;
@@ -505,11 +455,10 @@ int main(int argc, char **argv)
 	struct config cfg = { .ifindex = -1,
 			      .do_unload = false,
 			      .filename = "",
-			      .progsec = "xdp_sock" };
+			      .progsec = "xdp_ape_scramble" };
 	struct xsk_umem_info *umem;
 	struct xsk_socket_info *xsk_socket;
 	struct bpf_object *bpf_obj = NULL;
-	pthread_t stats_poll_thread;
 
 	/* Global shutdown handler */
 	signal(SIGINT, exit_application);
@@ -527,6 +476,12 @@ int main(int argc, char **argv)
 	/* Unload XDP program if requested */
 	if (cfg.do_unload)
 		return xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0);
+
+	int len = snprintf(cfg.pin_dir, PATH_MAX, "%s/%s", pin_basedir, cfg.ifname);
+	if (len < 0) {
+		fprintf(stderr, "ERR: creating pin dirname\n");
+		return EXIT_FAIL_OPTION;
+	}
 
 	/* Load custom program if configured */
 	if (cfg.filename[0] != 0) {
@@ -583,16 +538,12 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	/* Start thread to do statistics display */
-	if (verbose) {
-		ret = pthread_create(&stats_poll_thread, NULL, stats_poll,
-				     xsk_socket);
-		if (ret) {
-			fprintf(stderr,
-				"ERROR: Failed creating statistics thread "
-				"\"%s\"\n",
-				strerror(errno));
-			exit(EXIT_FAILURE);
+	/* Use the --dev name as subdir for exporting/pinning maps */
+	if (!cfg.reuse_maps) {
+		int err = pin_maps_in_bpf_object(bpf_obj, &cfg);
+		if (err) {
+			fprintf(stderr, "ERR: pinning maps\n");
+			return err;
 		}
 	}
 

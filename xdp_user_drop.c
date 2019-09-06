@@ -20,9 +20,9 @@ static const char *__doc__ =
 #include <linux/if_link.h> /* depend on kernel-headers installed */
 #include <net/if.h>
 
-#include "xdp-tutorial/common/common_libbpf.h"
-#include "xdp-tutorial/common/common_params.h"
-#include "xdp-tutorial/common/common_user_bpf_xdp.h"
+#include "common/common_libbpf.h"
+#include "common/common_params.h"
+#include "common/common_user_bpf_xdp.h"
 
 static const char *default_filename = "xdp_prog_kern.o";
 

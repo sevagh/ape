@@ -2,9 +2,9 @@
 #include <linux/if_ether.h>
 #include <linux/in.h>
 
-#include "xdp-tutorial/headers/bpf_endian.h"
-#include "xdp-tutorial/headers/bpf_helpers.h"
-#include "xdp-tutorial/common/parsing_helpers.h"
+#include "headers/bpf_endian.h"
+#include "headers/bpf_helpers.h"
+#include "common/parsing_helpers.h"
 
 /*
  * 0 = UDP
@@ -17,7 +17,7 @@ struct bpf_map_def SEC("maps") scramble_count = {
 	.max_entries = 2,
 };
 
-struct bpf_map_def SEC("maps") scramble_xsks_map = {
+struct bpf_map_def SEC("maps") xsks_map = {
 	.type = BPF_MAP_TYPE_XSKMAP,
 	.key_size = sizeof(int),
 	.value_size = sizeof(int),
@@ -84,8 +84,8 @@ int xdp_ape_scramble_func(struct xdp_md *ctx)
 			lock_xadd(value, 1);
 
 		index = ctx->rx_queue_index;
-		if (bpf_map_lookup_elem(&scramble_xsks_map, &index))
-			return bpf_redirect_map(&scramble_xsks_map, index, 0);
+		if (bpf_map_lookup_elem(&xsks_map, &index))
+			return bpf_redirect_map(&xsks_map, index, 0);
 	}
 
 	return XDP_PASS;

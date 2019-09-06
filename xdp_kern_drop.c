@@ -2,9 +2,9 @@
 #include <linux/if_ether.h>
 #include <linux/in.h>
 
-#include "xdp-tutorial/headers/bpf_endian.h"
-#include "xdp-tutorial/headers/bpf_helpers.h"
-#include "xdp-tutorial/common/parsing_helpers.h"
+#include "headers/bpf_endian.h"
+#include "headers/bpf_helpers.h"
+#include "common/parsing_helpers.h"
 
 /*
  * 0 = UDP

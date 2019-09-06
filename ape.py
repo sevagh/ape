@@ -15,7 +15,12 @@ from prometheus_client import start_http_server, Counter, Gauge
 import datetime, threading
 
 
-STOP_DROP_STATS = False
+STOP_STATS = False
+
+
+def output_reader(proc):
+    for line in iter(proc.stdout.readline, b''):
+        print('got line: {0}'.format(line.decode('utf-8')), end='')
 
 
 def stats_thread(
@@ -77,8 +82,8 @@ def stats_thread(
         ),
     )[0]
     manipulated_metric.labels(device, action, port).set(dropped_packets)
-    global STOP_DROP_STATS
-    if not STOP_DROP_STATS:
+    global STOP_STATS
+    if not STOP_STATS:
         threading.Timer(
             stats_interval_s,
             stats_thread,
@@ -258,9 +263,9 @@ def main():
             ape_manipulated_metric,
         )
 
+    scramble_thread = None
     if run_scramble:
-        print(
-            subprocess.check_output(
+        proc = subprocess.Popen(
                 [
                     "./xdp_user_scramble",
                     "--auto-mode",
@@ -270,9 +275,15 @@ def main():
                     "xdp_ape_scramble",
                     "--filename",
                     "xdp_kern_scramble.o",
-                ]
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT
             )
-        )
+
+        scramble_thread = threading.Thread(target=output_reader, args=(proc,))
+        scramble_thread.start()
+        procs.append(proc)
+
         ape_modules_metric.labels(args.device, "xdp_ape_scramble").set(1.0)
         unload_cmds.append(
             ["./xdp_user_scramble", "--auto-mode", "--unload", "--dev", args.device]
@@ -290,10 +301,19 @@ def main():
         )
 
     def signal_handler(signal, frame):
-        global STOP_DROP_STATS
-        STOP_DROP_STATS = True
+        global STOP_STATS
+        STOP_STATS = True
         for u in unload_cmds:
             print(subprocess.check_output(u))
+        for p in procs:
+            p.terminate()
+            try:
+                print('waiting 5s for process to terminate...')
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print('subprocess did not terminate in time')
+        if scramble_thread:
+            scramble_thread.join()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
