@@ -1,0 +1,3 @@
+[submodule "xdp-tutorial"]
+	path = xdp-tutorial
+	url = https://github.com/xdp-project/xdp-tutorial
