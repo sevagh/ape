@@ -71,7 +71,7 @@ def stats_thread(
             .encode("utf-8")
         ),
     )[0]
-    total_metric.labels(device, "drop", port).set(total_packets)
+    total_metric.labels(device, action, port).set(total_packets)
     dropped_packets = unpack(
         "<2i",
         unhexlify(

@@ -38,6 +38,10 @@
 #define RX_BATCH_SIZE 64
 #define INVALID_UMEM_FRAME UINT64_MAX
 
+#ifndef MAX_SLEEP_MS
+#define MAX_SLEEP_MS 1000
+#endif
+
 struct xsk_umem_info {
 	struct xsk_ring_prod fq;
 	struct xsk_ring_cons cq;
@@ -120,7 +124,7 @@ static void dawdle()
 {
 	/* https://gist.github.com/justinloundagin/5536640 */
 	struct timespec tv;
-	int msec = (int)(((double)random() / INT_MAX) * 1000);
+	int msec = (int)(((double)random() / INT_MAX) * MAX_SLEEP_MS);
 	tv.tv_sec = 0;
 	tv.tv_nsec = 1000000 * msec;
 	if (nanosleep(&tv, NULL) == -1) {
@@ -294,8 +298,6 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 		return false;
 	}
 
-	printf("dest port is: %d\n", bpf_ntohs(udphdr->dest));
-
 	// sleep randomly to scramble
 	dawdle();
 
@@ -305,18 +307,16 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 		sin.sin6_family = AF_INET6;
 		sin.sin6_port = udphdr->dest;
 		inet_pton(AF_INET6, "::1", &sin.sin6_addr);
-		sent_bytes = sendto(udp6_out, (void *)pkt, len, 0,
+		sent_bytes = sendto(udp6_out, (void *)nh.pos, len, 0,
 				    (struct sockaddr *)&sin, sizeof(sin));
 	} else {
 		struct sockaddr_in sin;
 		sin.sin_family = AF_INET;
 		sin.sin_port = udphdr->dest;
 		sin.sin_addr.s_addr = inet_addr("127.0.0.1");
-		sent_bytes = sendto(udp4_out, (void *)pkt, len, 0,
+		sent_bytes = sendto(udp4_out, (void *)nh.pos, len, 0,
 				    (struct sockaddr *)&sin, sizeof(sin));
 	}
-
-	printf("sent %lu bytes\n", sent_bytes);
 
 	return true;
 }
@@ -354,7 +354,6 @@ static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
 
 	/* Process received packets */
 	for (i = 0; i < rcvd; i++) {
-		printf("processing this packet!\n");
 		uint64_t addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 		uint32_t len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
