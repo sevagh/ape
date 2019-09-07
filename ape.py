@@ -19,8 +19,8 @@ STOP_STATS = False
 
 
 def output_reader(proc):
-    for line in iter(proc.stdout.readline, b''):
-        print('got line: {0}'.format(line.decode('utf-8')), end='')
+    for line in iter(proc.stdout.readline, b""):
+        print("got line: {0}".format(line.decode("utf-8")), end="")
 
 
 def stats_thread(
@@ -266,19 +266,21 @@ def main():
     scramble_thread = None
     if run_scramble:
         proc = subprocess.Popen(
-                [
-                    "./xdp_user_scramble",
-                    "--auto-mode",
-                    "--dev",
-                    args.device,
-                    "--progsec",
-                    "xdp_ape_scramble",
-                    "--filename",
-                    "xdp_kern_scramble.o",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT
-            )
+            [
+                "./xdp_user_scramble",
+                "--auto-mode",
+                "--dev",
+                args.device,
+                "--progsec",
+                "xdp_ape_scramble",
+                "--filename",
+                "xdp_kern_scramble.o",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        print("sleeping 2s to let module load")
+        time.sleep(2)
 
         scramble_thread = threading.Thread(target=output_reader, args=(proc,))
         scramble_thread.start()
@@ -308,10 +310,10 @@ def main():
         for p in procs:
             p.terminate()
             try:
-                print('waiting 5s for process to terminate...')
+                print("waiting 5s for process to terminate...")
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                print('subprocess did not terminate in time')
+                print("subprocess did not terminate in time")
         if scramble_thread:
             scramble_thread.join()
         sys.exit(0)
