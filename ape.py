@@ -18,11 +18,6 @@ import datetime, threading
 STOP_STATS = False
 
 
-def output_reader(proc):
-    for line in iter(proc.stdout.readline, b""):
-        print("got line: {0}".format(line.decode("utf-8")), end="")
-
-
 def stats_thread(
     device,
     action,
@@ -47,7 +42,7 @@ def stats_thread(
             "0",
         ]
     )
-    dropped_pkts = subprocess.check_output(
+    manip_pkts = subprocess.check_output(
         [
             "bpftool",
             "--bpffs",
@@ -72,16 +67,16 @@ def stats_thread(
         ),
     )[0]
     total_metric.labels(device, action, port).set(total_packets)
-    dropped_packets = unpack(
+    manip_packets = unpack(
         "<2i",
         unhexlify(
-            dropped_pkts.split(b"value:")[-1][1:-1]
+            manip_pkts.split(b"value:")[-1][1:-1]
             .decode()
             .replace(" ", "")
             .encode("utf-8")
         ),
     )[0]
-    manipulated_metric.labels(device, action, port).set(dropped_packets)
+    manipulated_metric.labels(device, action, port).set(manip_packets)
     global STOP_STATS
     if not STOP_STATS:
         threading.Timer(
@@ -102,6 +97,17 @@ def stats_thread(
 
 
 def compile_xdp_kern_prog(makerule, cflags):
+    env = None
+    if cflags:
+        env = os.environ.copy()
+        env["CFLAGS"] = "{0}".format(" ".join(cflags))
+
+    logging.info(
+        subprocess.check_output("make {0}".format(makerule), shell=True, env=env)
+    )
+
+
+def compile_xdp_user_prog(makerule, cflags):
     env = None
     if cflags:
         env = os.environ.copy()
@@ -136,6 +142,12 @@ def main():
         dest="udp_scramble",
         type=int,
         help="%% of UDP packets to scramble",
+    )
+    parser.add_argument(
+        "--udp-mirror",
+        dest="udp_mirror",
+        type=int,
+        help="Dest port to mirror UDP packets to",
     )
     parser.add_argument(
         "--udp-port", dest="udp_port", type=int, help="UDP port to drop packets on"
@@ -193,6 +205,7 @@ def main():
 
     run_drop = False
     run_scramble = False
+    run_mirror = False
     unload_cmds = []
     procs = []
 
@@ -232,6 +245,23 @@ def main():
         os.setresgid(0, 0, -1)
         os.setresuid(0, 0, -1)
 
+    if args.udp_mirror:
+        if not args.udp_port:
+            print("--udp-mirror must be used with --udp-port", file=sys.stderr)
+            sys.exit(1)
+        run_mirror = True
+        cflags = ["-DUDP_PORT={0}".format(args.udp_port)]
+
+        # drop privileges
+        os.setresgid(sudo_gid, sudo_gid, -1)
+        os.setresuid(sudo_uid, sudo_uid, -1)
+
+        compile_xdp_kern_prog("kern_mirror_clean kern_mirror", cflags)
+
+        # get them back
+        os.setresgid(0, 0, -1)
+        os.setresuid(0, 0, -1)
+
     if run_drop:
         print(
             subprocess.check_output(
@@ -252,18 +282,18 @@ def main():
             ["./xdp_user_drop", "--auto-mode", "--unload", "--dev", args.device]
         )
 
-        print("Starting bpftool map listener in thread")
+        map_name = "/sys/fs/bpf/{0}/drop_count".format(args.device)
+        print("Starting bpftool listener for map {0} in thread".format(map_name))
         stats_thread(
             args.device,
             "drop",
             args.udp_port,
-            "/sys/fs/bpf/{0}/drop_count".format(args.device),
+            map_name,
             args.stats_interval_s,
             ape_total_metric,
             ape_manipulated_metric,
         )
 
-    scramble_thread = None
     if run_scramble:
         proc = subprocess.Popen(
             [
@@ -283,8 +313,6 @@ def main():
         print("sleeping 2s to let module load")
         time.sleep(2)
 
-        scramble_thread = threading.Thread(target=output_reader, args=(proc,))
-        scramble_thread.start()
         procs.append(proc)
 
         ape_modules_metric.labels(args.device, "xdp_ape_scramble").set(1.0)
@@ -292,12 +320,53 @@ def main():
             ["./xdp_user_scramble", "--auto-mode", "--unload", "--dev", args.device]
         )
 
-        print("Starting bpftool map listener in thread")
+        map_name = "/sys/fs/bpf/{0}/scramble_count".format(args.device)
+        print("Starting bpftool listener for map {0} in thread".format(map_name))
         stats_thread(
             args.device,
             "scramble",
             args.udp_port,
-            "/sys/fs/bpf/{0}/scramble_count".format(args.device),
+            map_name,
+            args.stats_interval_s,
+            ape_total_metric,
+            ape_manipulated_metric,
+        )
+
+    if run_mirror:
+        proc = subprocess.Popen(
+            [
+                "./xdp_user_mirror",
+                "--auto-mode",
+                "--poll-mode",
+                "--mirror-port",
+                str(args.udp_mirror),
+                "--dev",
+                args.device,
+                "--progsec",
+                "xdp_ape_mirror",
+                "--filename",
+                "xdp_kern_mirror.o",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        print("sleeping 2s to let module load")
+        time.sleep(2)
+
+        procs.append(proc)
+
+        ape_modules_metric.labels(args.device, "xdp_ape_mirror").set(1.0)
+        unload_cmds.append(
+            ["./xdp_user_mirror", "--auto-mode", "--unload", "--dev", args.device]
+        )
+
+        map_name = "/sys/fs/bpf/{0}/mirror_count".format(args.device)
+        print("Starting bpftool listener for map {0} in thread".format(map_name))
+        stats_thread(
+            args.device,
+            "mirror",
+            args.udp_port,
+            map_name,
             args.stats_interval_s,
             ape_total_metric,
             ape_manipulated_metric,
@@ -315,8 +384,6 @@ def main():
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 print("subprocess did not terminate in time")
-        if scramble_thread:
-            scramble_thread.join()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)

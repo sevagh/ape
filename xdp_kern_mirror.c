@@ -10,14 +10,14 @@
  * 0 = UDP
  * 1 = total
  */
-struct bpf_map_def SEC("maps") scramble_count = {
+struct bpf_map_def SEC("maps") mirror_count = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(int),
 	.value_size = sizeof(long),
 	.max_entries = 2,
 };
 
-struct bpf_map_def SEC("maps") scramble_xsks = {
+struct bpf_map_def SEC("maps") mirror_xsks = {
 	.type = BPF_MAP_TYPE_XSKMAP,
 	.key_size = sizeof(int),
 	.value_size = sizeof(int),
@@ -34,8 +34,8 @@ struct bpf_map_def SEC("maps") scramble_xsks = {
 #define UDP_TABLE_KEY 0
 #define TOTAL_TABLE_KEY 1
 
-SEC("xdp_ape_scramble")
-int xdp_ape_scramble_func(struct xdp_md *ctx)
+SEC("xdp_ape_mirror")
+int xdp_ape_mirror_func(struct xdp_md *ctx)
 {
 	int eth_type, ip_type, map_key, index;
 	struct ethhdr *eth;
@@ -73,21 +73,13 @@ int xdp_ape_scramble_func(struct xdp_md *ctx)
 
 	//if we're here, it's a UDP packet with dst port we care about
 	map_key = TOTAL_TABLE_KEY;
-	value = bpf_map_lookup_elem(&scramble_count, &map_key);
+	value = bpf_map_lookup_elem(&mirror_count, &map_key);
 	if (value)
 		lock_xadd(value, 1);
 
-	if ((bpf_get_prandom_u32() % 100) < UDP_SCRAMBLE_PROB) {
-		map_key = UDP_TABLE_KEY;
-		value = bpf_map_lookup_elem(&scramble_count, &map_key);
-		if (value)
-			lock_xadd(value, 1);
-
-		index = ctx->rx_queue_index;
-		if (bpf_map_lookup_elem(&scramble_xsks, &index))
-			return bpf_redirect_map(&scramble_xsks, index, 0);
-	}
-
+	index = ctx->rx_queue_index;
+	if (bpf_map_lookup_elem(&mirror_xsks, &index))
+		return bpf_redirect_map(&mirror_xsks, index, 0);
 	return XDP_PASS;
 }
 

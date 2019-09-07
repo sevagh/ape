@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
 
 # Departing from the implicit _user.c scheme
-XDP_TARGETS  := xdp_kern_drop xdp_kern_scramble
-USER_TARGETS := xdp_user_drop xdp_user_scramble
+XDP_TARGETS  := xdp_kern_drop xdp_kern_scramble xdp_kern_mirror
+USER_TARGETS := xdp_user_drop xdp_user_scramble xdp_user_mirror
 
 LIBBPF_DIR = libbpf/src/
 COMMON_DIR = common/

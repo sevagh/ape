@@ -14,6 +14,8 @@ Ape looks stitched together, because it is. It consists of the following pieces:
 
 `ape.py` must be run with sudo to execute privileged actions e.g. attaching XDP programs to NICs, but it drops privileges to `SUDO_UID` when compiling the kernel modules to not create root-owned files in the repository.
 
+The maps intended for packet counts and stats are pinned using `bpffs`, and read using `bpftool`.
+
 ### drop
 
 Drop UDP4/6 packets from an interface, with an optional port.

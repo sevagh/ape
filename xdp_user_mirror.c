@@ -78,6 +78,11 @@ static const struct option_wrapper long_options[] = {
 	  "<ifname>",
 	  true },
 
+	{ { "mirror-port", required_argument, NULL, 'm' },
+	  "Mirror packets to this port",
+	  "<mirror-port>",
+	  true },
+
 	{ { "skb-mode", no_argument, NULL, 'S' },
 	  "Install XDP program in SKB (AKA generic) mode" },
 
@@ -119,18 +124,6 @@ static const struct option_wrapper long_options[] = {
 };
 
 static bool global_exit;
-
-static void dawdle()
-{
-	/* https://gist.github.com/justinloundagin/5536640 */
-	struct timespec tv;
-	int msec = (int)(((double)random() / INT_MAX) * MAX_SLEEP_MS);
-	tv.tv_sec = 0;
-	tv.tv_nsec = 1000000 * msec;
-	if (nanosleep(&tv, NULL) == -1) {
-		perror("nanosleep");
-	}
-}
 
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 {
@@ -260,7 +253,8 @@ static void complete_tx(struct xsk_socket_info *xsk)
 }
 
 static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
-			   uint32_t len, int udp4_out, int udp6_out)
+			   uint32_t len, int udp4_out, int udp6_out,
+			   int mirror_port)
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
@@ -298,32 +292,39 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 		return false;
 	}
 
-	// sleep randomly to scramble
-	printf("RANDOM SLEEP!!!!\n");
-	dawdle();
+	int dest_ports[2] = { udphdr->dest, mirror_port };
+	int i;
 
 	ssize_t sent_bytes;
 	if (use_ipv6) {
 		struct sockaddr_in6 sin;
 		sin.sin6_family = AF_INET6;
-		sin.sin6_port = udphdr->dest;
 		inet_pton(AF_INET6, "::1", &sin.sin6_addr);
-		sent_bytes = sendto(udp6_out, (void *)nh.pos, len, 0,
-				    (struct sockaddr *)&sin, sizeof(sin));
+
+		for (i = 0; i < 2; ++i) {
+			sin.sin6_port = dest_ports[i];
+			sent_bytes =
+				sendto(udp6_out, (void *)nh.pos, len, 0,
+				       (struct sockaddr *)&sin, sizeof(sin));
+		}
 	} else {
 		struct sockaddr_in sin;
 		sin.sin_family = AF_INET;
-		sin.sin_port = udphdr->dest;
 		sin.sin_addr.s_addr = inet_addr("127.0.0.1");
-		sent_bytes = sendto(udp4_out, (void *)nh.pos, len, 0,
-				    (struct sockaddr *)&sin, sizeof(sin));
+
+		for (i = 0; i < 2; ++i) {
+			sin.sin_port = dest_ports[i];
+			sent_bytes =
+				sendto(udp4_out, (void *)nh.pos, len, 0,
+				       (struct sockaddr *)&sin, sizeof(sin));
+		}
 	}
 
 	return true;
 }
 
 static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
-				   int udp6_out)
+				   int udp6_out, int mirror_port)
 {
 	unsigned int rcvd, stock_frames, i;
 	uint32_t idx_rx = 0, idx_fq = 0;
@@ -358,7 +359,8 @@ static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
 		uint64_t addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 		uint32_t len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
-		if (!process_packet(xsk, addr, len, udp4_out, udp6_out))
+		if (!process_packet(xsk, addr, len, udp4_out, udp6_out,
+				    mirror_port))
 			xsk_free_umem_frame(xsk, addr);
 	}
 
@@ -385,7 +387,9 @@ static void rx_and_process(struct config *cfg,
 			if (ret <= 0 || ret > 1)
 				continue;
 		}
-		handle_receive_packets(xsk_socket, udp4_out, udp6_out);
+		handle_receive_packets(xsk_socket, udp4_out, udp6_out,
+				       1234);
+				       //cfg->mirror_port);
 	}
 }
 
@@ -400,7 +404,7 @@ static void exit_application(int signal)
 #endif
 
 const char *pin_basedir = "/sys/fs/bpf";
-const char *map_name = "scramble_count";
+const char *map_name = "mirror_count";
 
 /* Pinning maps under /sys/fs/bpf in subdir */
 int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
@@ -449,14 +453,14 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	int xsks_map_fd, err;
+	int xsks_map_fd;
 	void *packet_buffer;
 	uint64_t packet_buffer_size;
 	struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
 	struct config cfg = { .ifindex = -1,
 			      .do_unload = false,
 			      .filename = "",
-			      .progsec = "xdp_ape_scramble" };
+			      .progsec = "xdp_ape_mirror" };
 	struct xsk_umem_info *umem;
 	struct xsk_socket_info *xsk_socket;
 	struct bpf_object *bpf_obj = NULL;
@@ -496,21 +500,12 @@ int main(int argc, char **argv)
 		}
 
 		/* We also need to load the xsks_map */
-		map = bpf_object__find_map_by_name(bpf_obj, "scramble_xsks");
+		map = bpf_object__find_map_by_name(bpf_obj, "mirror_xsks");
 		xsks_map_fd = bpf_map__fd(map);
 		if (xsks_map_fd < 0) {
 			fprintf(stderr, "ERROR: no xsks map found: %s\n",
 				strerror(xsks_map_fd));
 			exit(EXIT_FAILURE);
-		}
-	}
-
-	/* Use the --dev name as subdir for exporting/pinning maps */
-	if (!cfg.reuse_maps) {
-		err = pin_maps_in_bpf_object(bpf_obj, &cfg);
-		if (err) {
-			fprintf(stderr, "ERR: pinning maps\n");
-			return err;
 		}
 	}
 
@@ -547,6 +542,18 @@ int main(int argc, char **argv)
 		fprintf(stderr, "ERROR: Can't setup AF_XDP socket \"%s\"\n",
 			strerror(errno));
 		exit(EXIT_FAILURE);
+	}
+
+	int err;
+
+	/* Use the --dev name as subdir for exporting/pinning maps */
+	if (!cfg.reuse_maps) {
+		printf("TRYING TO RE-USE MAPS??\n");
+		err = pin_maps_in_bpf_object(bpf_obj, &cfg);
+		if (err) {
+			fprintf(stderr, "ERR: pinning maps\n");
+			return err;
+		}
 	}
 
 	/* set up udp4 sender socket */
