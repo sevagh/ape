@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
+#include <limits.h>
 #include <assert.h>
 #include <errno.h>
 #include <getopt.h>
@@ -28,6 +29,9 @@
 #include "common/common_params.h"
 #include "common/common_user_bpf_xdp.h"
 #include "common/common_libbpf.h"
+#include "headers/bpf_endian.h"
+//#include "headers/bpf_helpers.h"
+#include "common/parsing_helpers.h"
 
 #define NUM_FRAMES 4096
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
@@ -111,6 +115,18 @@ static const struct option_wrapper long_options[] = {
 };
 
 static bool global_exit;
+
+static void dawdle()
+{
+	/* https://gist.github.com/justinloundagin/5536640 */
+	struct timespec tv;
+	int msec = (int)(((double)random() / INT_MAX) * 1000);
+	tv.tv_sec = 0;
+	tv.tv_nsec = 1000000 * msec;
+	if (nanosleep(&tv, NULL) == -1) {
+		perror("nanosleep");
+	}
+}
 
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 {
@@ -240,29 +256,73 @@ static void complete_tx(struct xsk_socket_info *xsk)
 }
 
 static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
-			   uint32_t len)
+			   uint32_t len, int udp4_out, int udp6_out)
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
-	int ret;
-	uint32_t tx_idx = 0;
 
-	ret = xsk_ring_prod__reserve(&xsk->tx, 1, &tx_idx);
-	if (ret != 1) {
-		/* No more transmit slots, drop the packet */
+	int eth_type, ip_type;
+	struct ethhdr *eth;
+	struct iphdr *iphdr;
+	struct ipv6hdr *ipv6hdr;
+	struct udphdr *udphdr;
+	void *data = (void *)pkt;
+	void *data_end = (void *)pkt + len;
+	struct hdr_cursor nh = { .pos = data };
+
+	eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type < 0) {
 		return false;
 	}
 
-	printf("got a packet!\n");
+	bool use_ipv6 = false;
 
-	xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->addr = addr;
-	xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->len = len;
-	xsk_ring_prod__submit(&xsk->tx, 1);
-	xsk->outstanding_tx++;
+	if (eth_type == bpf_htons(ETH_P_IP)) {
+		ip_type = parse_iphdr(&nh, data_end, &iphdr);
+	} else if (eth_type == bpf_htons(ETH_P_IPV6)) {
+		ip_type = parse_ip6hdr(&nh, data_end, &ipv6hdr);
+		use_ipv6 = true;
+	} else {
+		return false;
+	}
+
+	// only support UDP for now
+	if (ip_type != IPPROTO_UDP)
+		return false;
+
+	// invalid udp
+	if (parse_udphdr(&nh, data_end, &udphdr) < 0) {
+		return false;
+	}
+
+	printf("dest port is: %d\n", bpf_ntohs(udphdr->dest));
+
+	// sleep randomly to scramble
+	dawdle();
+
+	ssize_t sent_bytes;
+	if (use_ipv6) {
+		struct sockaddr_in6 sin;
+		sin.sin6_family = AF_INET6;
+		sin.sin6_port = udphdr->dest;
+		inet_pton(AF_INET6, "::1", &sin.sin6_addr);
+		sent_bytes = sendto(udp6_out, (void *)pkt, len, 0,
+				    (struct sockaddr *)&sin, sizeof(sin));
+	} else {
+		struct sockaddr_in sin;
+		sin.sin_family = AF_INET;
+		sin.sin_port = udphdr->dest;
+		sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+		sent_bytes = sendto(udp4_out, (void *)pkt, len, 0,
+				    (struct sockaddr *)&sin, sizeof(sin));
+	}
+
+	printf("sent %lu bytes\n", sent_bytes);
 
 	return true;
 }
 
-static void handle_receive_packets(struct xsk_socket_info *xsk)
+static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
+				   int udp6_out)
 {
 	unsigned int rcvd, stock_frames, i;
 	uint32_t idx_rx = 0, idx_fq = 0;
@@ -298,7 +358,7 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 		uint64_t addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 		uint32_t len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
-		if (!process_packet(xsk, addr, len))
+		if (!process_packet(xsk, addr, len, udp4_out, udp6_out))
 			xsk_free_umem_frame(xsk, addr);
 	}
 
@@ -309,7 +369,8 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 }
 
 static void rx_and_process(struct config *cfg,
-			   struct xsk_socket_info *xsk_socket)
+			   struct xsk_socket_info *xsk_socket, int udp4_out,
+			   int udp6_out)
 {
 	struct pollfd fds[2];
 	int ret, nfds = 1;
@@ -324,7 +385,7 @@ static void rx_and_process(struct config *cfg,
 			if (ret <= 0 || ret > 1)
 				continue;
 		}
-		handle_receive_packets(xsk_socket);
+		handle_receive_packets(xsk_socket, udp4_out, udp6_out);
 	}
 }
 
@@ -479,22 +540,75 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
+	int err;
+
 	/* Use the --dev name as subdir for exporting/pinning maps */
 	if (!cfg.reuse_maps) {
-		int err = pin_maps_in_bpf_object(bpf_obj, &cfg);
+		err = pin_maps_in_bpf_object(bpf_obj, &cfg);
 		if (err) {
 			fprintf(stderr, "ERR: pinning maps\n");
 			return err;
 		}
 	}
 
+	/* set up udp4 sender socket */
+	int udp4_sender_sock_fd;
+	err = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (err < 0) {
+		perror("cannot create socket");
+		return err;
+	}
+	udp4_sender_sock_fd = err;
+
+	struct sockaddr_in udp4_sender_sockaddr;
+
+	memset((char *)&udp4_sender_sockaddr, 0, sizeof(udp4_sender_sockaddr));
+	udp4_sender_sockaddr.sin_family = AF_INET;
+	udp4_sender_sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	udp4_sender_sockaddr.sin_port = htons(0);
+
+	err = bind(udp4_sender_sock_fd,
+		   (struct sockaddr *)&udp4_sender_sockaddr,
+		   sizeof(udp4_sender_sockaddr));
+	if (err < 0) {
+		perror("bind failed");
+		return err;
+	}
+
+	/* set up udp6 sender socket */
+	int udp6_sender_sock_fd;
+	err = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (err < 0) {
+		perror("cannot create socket");
+		return err;
+	}
+	udp6_sender_sock_fd = err;
+
+	struct sockaddr_in6 udp6_sender_sockaddr;
+
+	memset((char *)&udp6_sender_sockaddr, 0, sizeof(udp6_sender_sockaddr));
+	udp6_sender_sockaddr.sin6_family = AF_INET6;
+	udp6_sender_sockaddr.sin6_addr = in6addr_any;
+	udp6_sender_sockaddr.sin6_port = htons(0);
+
+	err = bind(udp6_sender_sock_fd,
+		   (struct sockaddr *)&udp6_sender_sockaddr,
+		   sizeof(udp6_sender_sockaddr));
+	if (err < 0) {
+		perror("bind failed");
+		return err;
+	}
+
 	/* Receive and count packets than drop them */
-	rx_and_process(&cfg, xsk_socket);
+	rx_and_process(&cfg, xsk_socket, udp4_sender_sock_fd,
+		       udp6_sender_sock_fd);
 
 	/* Cleanup */
 	xsk_socket__delete(xsk_socket->xsk);
 	xsk_umem__delete(umem->umem);
 	xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0);
+	close(udp4_sender_sock_fd);
+	close(udp6_sender_sock_fd);
 
 	return EXIT_OK;
 }

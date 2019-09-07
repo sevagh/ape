@@ -41,7 +41,6 @@ int xdp_ape_scramble_func(struct xdp_md *ctx)
 	struct ethhdr *eth;
 	struct iphdr *iphdr;
 	struct ipv6hdr *ipv6hdr;
-	struct udphdr *udphdr;
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct hdr_cursor nh = { .pos = data };
@@ -64,6 +63,7 @@ int xdp_ape_scramble_func(struct xdp_md *ctx)
 		return XDP_PASS;
 
 #ifdef UDP_PORT
+	struct udphdr *udphdr;
 	// don't mess with ports outside our purview, if specified
 	if (parse_udphdr(&nh, data_end, &udphdr) < 0)
 		return XDP_ABORTED;

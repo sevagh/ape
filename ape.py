@@ -269,6 +269,7 @@ def main():
             [
                 "./xdp_user_scramble",
                 "--auto-mode",
+                "--poll-mode",
                 "--dev",
                 args.device,
                 "--progsec",
