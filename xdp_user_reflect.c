@@ -78,11 +78,6 @@ static const struct option_wrapper long_options[] = {
 	  "<ifname>",
 	  true },
 
-	{ { "mirror-port", required_argument, NULL, 'm' },
-	  "Mirror packets to this port",
-	  "<mirror-port>",
-	  true },
-
 	{ { "skb-mode", no_argument, NULL, 'S' },
 	  "Install XDP program in SKB (AKA generic) mode" },
 
@@ -254,7 +249,7 @@ static void complete_tx(struct xsk_socket_info *xsk)
 
 static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 			   uint32_t len, int udp4_out, int udp6_out,
-			   int mirror_port)
+			   int reflect_port)
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
@@ -292,39 +287,36 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 		return false;
 	}
 
-	int dest_ports[2] = { udphdr->dest, mirror_port };
-	int i;
-
 	ssize_t sent_bytes;
 	if (use_ipv6) {
 		struct sockaddr_in6 sin;
 		sin.sin6_family = AF_INET6;
 		inet_pton(AF_INET6, "::1", &sin.sin6_addr);
-
-		for (i = 0; i < 2; ++i) {
-			sin.sin6_port = dest_ports[i];
-			sent_bytes =
-				sendto(udp6_out, (void *)nh.pos, len, 0,
-				       (struct sockaddr *)&sin, sizeof(sin));
-		}
+		sin.sin6_port = ntohs(reflect_port);
+		sent_bytes = sendto(udp6_out, (void *)nh.pos, len, 0,
+				    (struct sockaddr *)&sin, sizeof(sin));
 	} else {
 		struct sockaddr_in sin;
 		sin.sin_family = AF_INET;
-		sin.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-		for (i = 0; i < 2; ++i) {
-			sin.sin_port = dest_ports[i];
-			sent_bytes =
-				sendto(udp4_out, (void *)nh.pos, len, 0,
-				       (struct sockaddr *)&sin, sizeof(sin));
-		}
+		sin.sin_addr.s_addr = inet_addr("0.0.0.0");
+		sin.sin_port = ntohs(reflect_port);
+		sent_bytes = sendto(udp4_out, (void *)nh.pos, len, 0,
+				    (struct sockaddr *)&sin, sizeof(sin));
 	}
+
+	if (sent_bytes == -1) {
+		perror("sendto\n");
+		return false;
+	}
+
+	printf("sent %lu bytes over UDP to port %d\n", sent_bytes,
+	       reflect_port);
 
 	return true;
 }
 
 static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
-				   int udp6_out, int mirror_port)
+				   int udp6_out, int reflect_port)
 {
 	unsigned int rcvd, stock_frames, i;
 	uint32_t idx_rx = 0, idx_fq = 0;
@@ -360,7 +352,7 @@ static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
 		uint32_t len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
 		if (!process_packet(xsk, addr, len, udp4_out, udp6_out,
-				    mirror_port))
+				    reflect_port))
 			xsk_free_umem_frame(xsk, addr);
 	}
 
@@ -372,7 +364,7 @@ static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
 
 static void rx_and_process(struct config *cfg,
 			   struct xsk_socket_info *xsk_socket, int udp4_out,
-			   int udp6_out)
+			   int udp6_out, int reflect_port)
 {
 	struct pollfd fds[2];
 	int ret, nfds = 1;
@@ -388,8 +380,7 @@ static void rx_and_process(struct config *cfg,
 				continue;
 		}
 		handle_receive_packets(xsk_socket, udp4_out, udp6_out,
-				       1234);
-				       //cfg->mirror_port);
+				       reflect_port);
 	}
 }
 
@@ -404,7 +395,7 @@ static void exit_application(int signal)
 #endif
 
 const char *pin_basedir = "/sys/fs/bpf";
-const char *map_name = "mirror_count";
+const char *map_name = "reflect_count";
 
 /* Pinning maps under /sys/fs/bpf in subdir */
 int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
@@ -460,13 +451,18 @@ int main(int argc, char **argv)
 	struct config cfg = { .ifindex = -1,
 			      .do_unload = false,
 			      .filename = "",
-			      .progsec = "xdp_ape_mirror" };
+			      .progsec = "xdp_ape_reflect" };
 	struct xsk_umem_info *umem;
 	struct xsk_socket_info *xsk_socket;
 	struct bpf_object *bpf_obj = NULL;
 
 	/* Global shutdown handler */
 	signal(SIGINT, exit_application);
+
+	// hack cause i can't figure out how the FUCK to get common params to compile with additional flags
+	int reflect_port = atoi(argv[1]);
+	memcpy(&argv[1], &argv[2], (argc - 1) * sizeof(char *));
+	argc -= 1;
 
 	/* Cmdline options can change progsec */
 	parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
@@ -500,12 +496,23 @@ int main(int argc, char **argv)
 		}
 
 		/* We also need to load the xsks_map */
-		map = bpf_object__find_map_by_name(bpf_obj, "mirror_xsks");
+		map = bpf_object__find_map_by_name(bpf_obj, "xsks_map");
 		xsks_map_fd = bpf_map__fd(map);
 		if (xsks_map_fd < 0) {
 			fprintf(stderr, "ERROR: no xsks map found: %s\n",
 				strerror(xsks_map_fd));
 			exit(EXIT_FAILURE);
+		}
+	}
+
+	int err;
+
+	/* Use the --dev name as subdir for exporting/pinning maps */
+	if (!cfg.reuse_maps) {
+		err = pin_maps_in_bpf_object(bpf_obj, &cfg);
+		if (err) {
+			fprintf(stderr, "ERR: pinning maps\n");
+			return err;
 		}
 	}
 
@@ -542,18 +549,6 @@ int main(int argc, char **argv)
 		fprintf(stderr, "ERROR: Can't setup AF_XDP socket \"%s\"\n",
 			strerror(errno));
 		exit(EXIT_FAILURE);
-	}
-
-	int err;
-
-	/* Use the --dev name as subdir for exporting/pinning maps */
-	if (!cfg.reuse_maps) {
-		printf("TRYING TO RE-USE MAPS??\n");
-		err = pin_maps_in_bpf_object(bpf_obj, &cfg);
-		if (err) {
-			fprintf(stderr, "ERR: pinning maps\n");
-			return err;
-		}
 	}
 
 	/* set up udp4 sender socket */
@@ -606,7 +601,7 @@ int main(int argc, char **argv)
 
 	/* Receive and count packets than drop them */
 	rx_and_process(&cfg, xsk_socket, udp4_sender_sock_fd,
-		       udp6_sender_sock_fd);
+		       udp6_sender_sock_fd, reflect_port);
 
 	/* Cleanup */
 	xsk_socket__delete(xsk_socket->xsk);

@@ -3,7 +3,7 @@ BPF_MAKEFILE:="Makefile.bpf"
 all:
 	$(MAKE) user_drop
 	$(MAKE) user_scramble
-	$(MAKE) user_mirror
+	$(MAKE) user_reflect
 
 kern_drop_clean:
 	-rm xdp_kern_drop.ll xdp_kern_drop.o
@@ -11,11 +11,11 @@ kern_drop_clean:
 kern_drop:
 	$(MAKE) -f $(BPF_MAKEFILE) xdp_kern_drop.o
 
-kern_mirror_clean:
-	-rm xdp_kern_mirror.ll xdp_kern_mirror.o
+kern_reflect_clean:
+	-rm xdp_kern_reflect.ll xdp_kern_reflect.o
 
-kern_mirror:
-	$(MAKE) -f $(BPF_MAKEFILE) xdp_kern_mirror.o
+kern_reflect:
+	$(MAKE) -f $(BPF_MAKEFILE) xdp_kern_reflect.o
 
 kern_scramble_clean:
 	-rm xdp_kern_scramble.ll xdp_kern_scramble.o
@@ -35,16 +35,16 @@ user_scramble_clean:
 user_scramble:
 	$(MAKE) -f $(BPF_MAKEFILE) xdp_user_scramble
 
-user_mirror_clean:
-	-rm xdp_user_mirror
+user_reflect_clean:
+	-rm xdp_user_reflect
 
-user_mirror:
-	$(MAKE) -f $(BPF_MAKEFILE) xdp_user_mirror
+user_reflect:
+	$(MAKE) -f $(BPF_MAKEFILE) xdp_user_reflect
 
 clean:
 	$(MAKE) user_drop_clean
 	$(MAKE) user_scramble_clean
-	$(MAKE) user_mirror_clean
+	$(MAKE) user_reflect_clean
 
 fmt:
 	-clang-format -i *.h
@@ -52,4 +52,4 @@ fmt:
 	black ape.py
 
 
-.PHONY: user_drop_clean kern_drop_clean user_drop kern_drop kern_scramble_clean kern_scramble kern_mirror_clean kern_mirror user_mirror_clean user_mirror
+.PHONY: user_drop_clean kern_drop_clean user_drop kern_drop kern_scramble_clean kern_scramble kern_reflect_clean kern_reflect user_reflect_clean user_reflect

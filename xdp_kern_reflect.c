@@ -6,18 +6,14 @@
 #include "headers/bpf_helpers.h"
 #include "common/parsing_helpers.h"
 
-/*
- * 0 = UDP
- * 1 = total
- */
-struct bpf_map_def SEC("maps") mirror_count = {
+struct bpf_map_def SEC("maps") reflect_count = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(int),
 	.value_size = sizeof(long),
 	.max_entries = 2,
 };
 
-struct bpf_map_def SEC("maps") mirror_xsks = {
+struct bpf_map_def SEC("maps") xsks_map = {
 	.type = BPF_MAP_TYPE_XSKMAP,
 	.key_size = sizeof(int),
 	.value_size = sizeof(int),
@@ -31,11 +27,8 @@ struct bpf_map_def SEC("maps") mirror_xsks = {
 #define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
 #endif
 
-#define UDP_TABLE_KEY 0
-#define TOTAL_TABLE_KEY 1
-
-SEC("xdp_ape_mirror")
-int xdp_ape_mirror_func(struct xdp_md *ctx)
+SEC("xdp_ape_reflect")
+int xdp_ape_reflect_func(struct xdp_md *ctx)
 {
 	int eth_type, ip_type, map_key, index;
 	struct ethhdr *eth;
@@ -72,14 +65,20 @@ int xdp_ape_mirror_func(struct xdp_md *ctx)
 #endif /* UDP_PORT */
 
 	//if we're here, it's a UDP packet with dst port we care about
-	map_key = TOTAL_TABLE_KEY;
-	value = bpf_map_lookup_elem(&mirror_count, &map_key);
+	map_key = 0;
+	value = bpf_map_lookup_elem(&reflect_count, &map_key);
 	if (value)
 		lock_xadd(value, 1);
 
 	index = ctx->rx_queue_index;
-	if (bpf_map_lookup_elem(&mirror_xsks, &index))
-		return bpf_redirect_map(&mirror_xsks, index, 0);
+	if (bpf_map_lookup_elem(&xsks_map, &index)) {
+		map_key = 1;
+		value = bpf_map_lookup_elem(&reflect_count, &map_key);
+		if (value)
+			lock_xadd(value, 1);
+
+		return bpf_redirect_map(&xsks_map, index, 0);
+	}
 	return XDP_PASS;
 }
 

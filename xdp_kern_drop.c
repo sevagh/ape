@@ -6,10 +6,6 @@
 #include "headers/bpf_helpers.h"
 #include "common/parsing_helpers.h"
 
-/*
- * 0 = UDP
- * 1 = total
- */
 struct bpf_map_def SEC("maps") drop_count = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(int),
@@ -23,9 +19,6 @@ struct bpf_map_def SEC("maps") drop_count = {
 #ifndef lock_xadd
 #define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
 #endif
-
-#define UDP_TABLE_KEY 0
-#define TOTAL_TABLE_KEY 1
 
 SEC("xdp_ape_drop")
 int xdp_ape_drop_func(struct xdp_md *ctx)
@@ -66,13 +59,13 @@ int xdp_ape_drop_func(struct xdp_md *ctx)
 #endif /* UDP_PORT */
 
 	// if we're here, it's a UDP packet with dst port we care about
-	map_key = TOTAL_TABLE_KEY;
+	map_key = 0;
 	value = bpf_map_lookup_elem(&drop_count, &map_key);
 	if (value)
 		lock_xadd(value, 1);
 
 	if ((bpf_get_prandom_u32() % 100) < UDP_DROP_PROB) {
-		map_key = UDP_TABLE_KEY;
+		map_key = 1;
 		value = bpf_map_lookup_elem(&drop_count, &map_key);
 		if (value)
 			lock_xadd(value, 1);

@@ -299,7 +299,6 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 	}
 
 	// sleep randomly to scramble
-	printf("RANDOM SLEEP!!!!\n");
 	dawdle();
 
 	ssize_t sent_bytes;
@@ -496,7 +495,7 @@ int main(int argc, char **argv)
 		}
 
 		/* We also need to load the xsks_map */
-		map = bpf_object__find_map_by_name(bpf_obj, "scramble_xsks");
+		map = bpf_object__find_map_by_name(bpf_obj, "xsks_map");
 		xsks_map_fd = bpf_map__fd(map);
 		if (xsks_map_fd < 0) {
 			fprintf(stderr, "ERROR: no xsks map found: %s\n",

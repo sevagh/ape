@@ -18,6 +18,11 @@ import datetime, threading
 STOP_STATS = False
 
 
+def output_reader(proc):
+    for line in iter(proc.stdout.readline, b""):
+        log.info(line.decode("utf-8"))
+
+
 def stats_thread(
     device,
     action,
@@ -36,7 +41,7 @@ def stats_thread(
             "pinned",
             pinned_map_name,
             "key",
-            "1",
+            "0",
             "0",
             "0",
             "0",
@@ -51,7 +56,7 @@ def stats_thread(
             "pinned",
             pinned_map_name,
             "key",
-            "0",
+            "1",
             "0",
             "0",
             "0",
@@ -107,17 +112,6 @@ def compile_xdp_kern_prog(makerule, cflags):
     )
 
 
-def compile_xdp_user_prog(makerule, cflags):
-    env = None
-    if cflags:
-        env = os.environ.copy()
-        env["CFLAGS"] = "{0}".format(" ".join(cflags))
-
-    logging.info(
-        subprocess.check_output("make {0}".format(makerule), shell=True, env=env)
-    )
-
-
 def main():
     if os.geteuid() != 0:
         print(
@@ -144,10 +138,10 @@ def main():
         help="%% of UDP packets to scramble",
     )
     parser.add_argument(
-        "--udp-mirror",
-        dest="udp_mirror",
+        "--udp-reflect",
+        dest="udp_reflect",
         type=int,
-        help="Dest port to mirror UDP packets to",
+        help="Dest port to reflect UDP packets to",
     )
     parser.add_argument(
         "--udp-port", dest="udp_port", type=int, help="UDP port to drop packets on"
@@ -205,9 +199,11 @@ def main():
 
     run_drop = False
     run_scramble = False
-    run_mirror = False
+    run_reflect = False
     unload_cmds = []
     procs = []
+    threads = []
+    remove_maps = []
 
     if args.udp_drop:
         cflags = ["-DUDP_DROP_PROB={0}".format(args.udp_drop)]
@@ -245,18 +241,18 @@ def main():
         os.setresgid(0, 0, -1)
         os.setresuid(0, 0, -1)
 
-    if args.udp_mirror:
+    if args.udp_reflect:
         if not args.udp_port:
-            print("--udp-mirror must be used with --udp-port", file=sys.stderr)
+            print("--udp-reflect must be used with --udp-port", file=sys.stderr)
             sys.exit(1)
-        run_mirror = True
+        run_reflect = True
         cflags = ["-DUDP_PORT={0}".format(args.udp_port)]
 
         # drop privileges
         os.setresgid(sudo_gid, sudo_gid, -1)
         os.setresuid(sudo_uid, sudo_uid, -1)
 
-        compile_xdp_kern_prog("kern_mirror_clean kern_mirror", cflags)
+        compile_xdp_kern_prog("kern_reflect_clean kern_reflect", cflags)
 
         # get them back
         os.setresgid(0, 0, -1)
@@ -312,7 +308,10 @@ def main():
         )
         print("sleeping 2s to let module load")
         time.sleep(2)
+        scramble_thread = threading.Thread(target=output_reader, args=(proc,))
+        scramble_thread.start()
 
+        threads.append(scramble_thread)
         procs.append(proc)
 
         ape_modules_metric.labels(args.device, "xdp_ape_scramble").set(1.0)
@@ -331,46 +330,54 @@ def main():
             ape_total_metric,
             ape_manipulated_metric,
         )
+        xsks_map_name = "/sys/fs/bpf/{0}/xsks_map".format(args.device)
+        remove_maps.append(map_name)
+        remove_maps.append(xsks_map_name)
 
-    if run_mirror:
+    if run_reflect:
         proc = subprocess.Popen(
             [
-                "./xdp_user_mirror",
+                "./xdp_user_reflect",
+                str(args.udp_reflect),
                 "--auto-mode",
                 "--poll-mode",
-                "--mirror-port",
-                str(args.udp_mirror),
                 "--dev",
                 args.device,
                 "--progsec",
-                "xdp_ape_mirror",
+                "xdp_ape_reflect",
                 "--filename",
-                "xdp_kern_mirror.o",
+                "xdp_kern_reflect.o",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
         print("sleeping 2s to let module load")
         time.sleep(2)
+        reflect_thread = threading.Thread(target=output_reader, args=(proc,))
+        reflect_thread.start()
 
+        threads.append(reflect_thread)
         procs.append(proc)
 
-        ape_modules_metric.labels(args.device, "xdp_ape_mirror").set(1.0)
+        ape_modules_metric.labels(args.device, "xdp_ape_reflect").set(1.0)
         unload_cmds.append(
-            ["./xdp_user_mirror", "--auto-mode", "--unload", "--dev", args.device]
+            ["./xdp_user_reflect", "--auto-mode", "--unload", "--dev", args.device]
         )
 
-        map_name = "/sys/fs/bpf/{0}/mirror_count".format(args.device)
+        map_name = "/sys/fs/bpf/{0}/reflect_count".format(args.device)
         print("Starting bpftool listener for map {0} in thread".format(map_name))
         stats_thread(
             args.device,
-            "mirror",
+            "reflect",
             args.udp_port,
             map_name,
             args.stats_interval_s,
             ape_total_metric,
             ape_manipulated_metric,
         )
+        xsks_map_name = "/sys/fs/bpf/{0}/xsks_map".format(args.device)
+        remove_maps.append(map_name)
+        remove_maps.append(xsks_map_name)
 
     def signal_handler(signal, frame):
         global STOP_STATS
@@ -384,6 +391,14 @@ def main():
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 print("subprocess did not terminate in time")
+        for t in threads:
+            t.join()
+
+        print("sleeping 2*{0} for stats thread to die".format(args.stats_interval_s))
+        time.sleep(2 * args.stats_interval_s)
+        for m in remove_maps:
+            print("Removing pinned map '{0}'".format(m))
+            os.remove(m)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)

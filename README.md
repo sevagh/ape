@@ -2,6 +2,16 @@
 
 Ape is a tool to manipulate UDP (both ipv4 and ipv6) packets.
 
+It can:
+
+* **drop** a % of UDP packets (pseudorandomly) on an interface, by port or on all ports
+* **scramble** a % of UDP packets on an interface, by redirecting them to userspace with AF_XDP and randomly sleeping before forwarding it to the original destination
+* **reflect** all the packets from one UDP port to another
+
+Desired future functionality:
+
+* **mirror** packets from one port to another. But how? It triggers an XDP feedback loop. XDP redirects port XXX packets to userspace, userspace sends port XXX packets to XXX and YYY, XDP redirects port XXX packets, etc. XDP metadata solution?
+
 The learning resources I used to create this project is https://github.com/xdp-project/xdp-tutorial (highly recommended if you want to get started with XDP). `headers/` and `common/` are copied from it.
 
 ### architecture
@@ -24,7 +34,7 @@ ape, dropping 50% of UDP packets on port 1337 on lo:
 ```
 sevagh:ape $ sudo ./ape.py --udp-drop 50 --udp-port 1337 lo
 b'Success: Loaded BPF-object(xdp_kern_drop.o) and used section(xdp_ape_drop)\n - XDP prog attached on device:lo(ifindex:1)\n - Unpinning (remove) prev maps in /sys/fs/bpf/lo/\n - Pinning maps in /sys/fs/bpf/lo/\n'
-Starting bpftool map listener in thread
+Starting bpftool listener for map /sys/fs/bpf/lo/drop_count in thread
 Started prometheus metrics server at http://localhost:8000
 ```
 
@@ -66,7 +76,7 @@ ape, scrambling 50% of UDP packets on port 1337 on lo:
 ```
 sevagh:ape $ sudo ./ape.py --udp-scramble 50 --udp-port 1337 lo
 sleeping 2s to let module load
-Starting bpftool map listener in thread
+Starting bpftool listener for map /sys/fs/bpf/lo/scramble_count in thread
 Started prometheus metrics server at http://localhost:8000
 ```
 
@@ -100,3 +110,54 @@ ape_manipulated_udp_packets{action="scramble",device="lo",port="1337"} 8.0
 ```
 
 There are more than 10 total packets, because `scramble` will feed back to itself (the XDP kernel program will probably re-scramble packets sent by the user scramble program).
+
+### reflect
+
+Reflect, similar to scramble, relies on AF_XDP.
+
+ape, reflecting UDP packets from port 1337 to 1234 on lo:
+```
+sevagh:ape $ sudo ./ape.py --udp-reflect 1234 --udp-port 1337 lo
+sleeping 2s to let module load
+Starting bpftool listener for map /sys/fs/bpf/lo/reflect_count in thread
+Started prometheus metrics server at http://localhost:8000
+```
+
+socat sender:
+```
+sevagh:~ $ for x in 1 2 3 4 5 6 7 8 9 10; do echo "hello world ${x}" | socat - UDP6-SENDTO:[::1]:1337; done
+```
+
+socat receiver, port 1234:
+```
+sevagh:~ $ socat - UDP6-LISTEN:1234,bind=[::1],fork
+hello world 1
+hello world 2
+hello world 3
+hello world 4
+hello world 5
+hello world 6
+hello world 7
+hello world 8
+hello world 9
+hello world 10
+```
+
+socat receiver, port 1337:
+```
+sevagh:~ $ socat - UDP6-LISTEN:1337,bind=[::1],fork
+```
+
+Ape metrics:
+
+```
+# HELP ape_loaded_xdp_progs XDP kernel programs loaded and attached by ape
+# TYPE ape_loaded_xdp_progs gauge
+ape_loaded_xdp_progs{interface="lo",name="xdp_ape_reflect"} 1.0
+# HELP ape_total_udp_packets UDP packets intercepted by ape
+# TYPE ape_total_udp_packets gauge
+ape_total_udp_packets{action="reflect",device="lo",port="1234"} 10.0
+# HELP ape_manipulated_udp_packets UDP packets manipulated by ape
+# TYPE ape_manipulated_udp_packets gauge
+ape_manipulated_udp_packets{action="reflect",device="lo",port="1234"} 10.0
+```
