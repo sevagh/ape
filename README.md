@@ -12,7 +12,7 @@ Desired future functionality:
 
 * **mirror** packets from one port to another. But how? It triggers an XDP feedback loop. XDP redirects port XXX packets to userspace, userspace sends port XXX packets to XXX and YYY, XDP redirects port XXX packets, etc. XDP metadata solution?
 
-The learning resources I used to create this project is https://github.com/xdp-project/xdp-tutorial (highly recommended if you want to get started with XDP). `headers/` and `common/` are copied from it.
+The learning resource I used to create this project is https://github.com/xdp-project/xdp-tutorial  - I highly recommended it if you want to get started with XDP. `headers/` and `common/` are copied from it. You most likely need the [bpf-next](https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git) kernel to use AF_XDP. I was able to follow the [Fedora instructions](https://fedoraproject.org/wiki/Building_a_custom_kernel#Building_Vanilla_upstream_kernel) for installing a custom kernel with no problems.
 
 ### architecture
 
