@@ -20,7 +20,7 @@ STOP_STATS = False
 
 def output_reader(proc):
     for line in iter(proc.stdout.readline, b""):
-        log.info(line.decode("utf-8"))
+        logging.info(line.decode("utf-8"))
 
 
 def stats_thread(
@@ -136,6 +136,13 @@ def main():
         dest="udp_scramble",
         type=int,
         help="%% of UDP packets to scramble",
+    )
+    parser.add_argument(
+        "--max-sleep-ms",
+        dest="max_sleep_ms",
+        type=int,
+        help="Max sleep (ms) to delay packets in scramble mode",
+        default=1000,
     )
     parser.add_argument(
         "--udp-reflect",
@@ -294,6 +301,8 @@ def main():
         proc = subprocess.Popen(
             [
                 "./xdp_user_scramble",
+                "--max-sleep-ms",
+                "{0}".format(args.max_sleep_ms),
                 "--auto-mode",
                 "--poll-mode",
                 "--dev",
@@ -338,7 +347,8 @@ def main():
         proc = subprocess.Popen(
             [
                 "./xdp_user_reflect",
-                str(args.udp_reflect),
+                "--reflect-port",
+                "{0}".format(args.udp_reflect),
                 "--auto-mode",
                 "--poll-mode",
                 "--dev",

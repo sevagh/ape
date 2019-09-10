@@ -51,5 +51,4 @@ fmt:
 	-clang-format -i *.c
 	black ape.py
 
-
 .PHONY: user_drop_clean kern_drop_clean user_drop kern_drop kern_scramble_clean kern_scramble kern_reflect_clean kern_reflect user_reflect_clean user_reflect

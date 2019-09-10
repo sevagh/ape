@@ -67,7 +67,7 @@ static inline __u32 xsk_ring_prod__free(struct xsk_ring_prod *r)
 	return r->cached_cons - r->cached_prod;
 }
 
-static const char *__doc__ = "AF_XDP kernel bypass example\n";
+static const char *__doc__ = "github.com/sevagh/ape\n";
 
 static const struct option_wrapper long_options[] = {
 
@@ -76,6 +76,11 @@ static const struct option_wrapper long_options[] = {
 	{ { "dev", required_argument, NULL, 'd' },
 	  "Operate on device <ifname>",
 	  "<ifname>",
+	  true },
+
+	{ { "reflect-port", required_argument, NULL, 'P' },
+	  "Port to reflect packets to",
+	  "<reflect_port>",
 	  true },
 
 	{ { "skb-mode", no_argument, NULL, 'S' },
@@ -238,7 +243,7 @@ static void complete_tx(struct xsk_socket_info *xsk)
 		&xsk->umem->cq, XSK_RING_CONS__DEFAULT_NUM_DESCS, &idx_cq);
 
 	if (completed > 0) {
-		for (int i = 0; i < completed; i++)
+		for (size_t i = 0; i < completed; i++)
 			xsk_free_umem_frame(
 				xsk, *xsk_ring_cons__comp_addr(&xsk->umem->cq,
 							       idx_cq++));
@@ -459,11 +464,6 @@ int main(int argc, char **argv)
 	/* Global shutdown handler */
 	signal(SIGINT, exit_application);
 
-	// hack cause i can't figure out how the FUCK to get common params to compile with additional flags
-	int reflect_port = atoi(argv[1]);
-	memcpy(&argv[1], &argv[2], (argc - 1) * sizeof(char *));
-	argc -= 1;
-
 	/* Cmdline options can change progsec */
 	parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
 
@@ -601,7 +601,7 @@ int main(int argc, char **argv)
 
 	/* Receive and count packets than drop them */
 	rx_and_process(&cfg, xsk_socket, udp4_sender_sock_fd,
-		       udp6_sender_sock_fd, reflect_port);
+		       udp6_sender_sock_fd, cfg.reflect_port);
 
 	/* Cleanup */
 	xsk_socket__delete(xsk_socket->xsk);

@@ -92,9 +92,15 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:ASNFUMQ:czpq",
+	while ((opt = getopt_long(argc, argv, "hm:d:r:L:R:ASNFUMQ:czpq",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
+		case 'm':
+			cfg->max_sleep_ms = atoi(optarg);
+			break;
+		case 'P':
+			cfg->reflect_port = atoi(optarg);
+			break;
 		case 'd':
 			if (strlen(optarg) >= IF_NAMESIZE) {
 				fprintf(stderr, "ERR: --dev name too long\n");

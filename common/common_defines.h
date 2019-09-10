@@ -23,6 +23,8 @@ struct config {
 	__u16 xsk_bind_flags;
 	int xsk_if_queue;
 	bool xsk_poll_mode;
+	int reflect_port;
+	int max_sleep_ms;
 };
 
 /* Defined in common_params.o */

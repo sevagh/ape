@@ -9,3 +9,5 @@ COMMON_DIR = common/
 
 include $(COMMON_DIR)/common.mk
 LIBS += -lpthread -lrt
+
+CFLAGS += -Wall -Wextra -Wshadow

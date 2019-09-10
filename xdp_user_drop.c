@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-static const char *__doc__ =
-	"XDP loader\n"
-	" - Allows selecting BPF section --progsec name to XDP-attach to --dev\n";
+static const char *__doc__ = "github.com/sevagh/ape\n";
 
 #include <errno.h>
 #include <getopt.h>

@@ -30,17 +30,12 @@
 #include "common/common_user_bpf_xdp.h"
 #include "common/common_libbpf.h"
 #include "headers/bpf_endian.h"
-//#include "headers/bpf_helpers.h"
 #include "common/parsing_helpers.h"
 
 #define NUM_FRAMES 4096
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 #define RX_BATCH_SIZE 64
 #define INVALID_UMEM_FRAME UINT64_MAX
-
-#ifndef MAX_SLEEP_MS
-#define MAX_SLEEP_MS 1000
-#endif
 
 struct xsk_umem_info {
 	struct xsk_ring_prod fq;
@@ -67,7 +62,7 @@ static inline __u32 xsk_ring_prod__free(struct xsk_ring_prod *r)
 	return r->cached_cons - r->cached_prod;
 }
 
-static const char *__doc__ = "AF_XDP kernel bypass example\n";
+static const char *__doc__ = "github.com/sevagh/ape\n";
 
 static const struct option_wrapper long_options[] = {
 
@@ -76,6 +71,11 @@ static const struct option_wrapper long_options[] = {
 	{ { "dev", required_argument, NULL, 'd' },
 	  "Operate on device <ifname>",
 	  "<ifname>",
+	  true },
+
+	{ { "max-sleep-ms", required_argument, NULL, 'm' },
+	  "Nanosleep 0-max_sleep (ms) to delay packets",
+	  "<max_sleep_ms>",
 	  true },
 
 	{ { "skb-mode", no_argument, NULL, 'S' },
@@ -120,11 +120,11 @@ static const struct option_wrapper long_options[] = {
 
 static bool global_exit;
 
-static void dawdle()
+static void dawdle(int max_sleep_ms)
 {
 	/* https://gist.github.com/justinloundagin/5536640 */
 	struct timespec tv;
-	int msec = (int)(((double)random() / INT_MAX) * MAX_SLEEP_MS);
+	int msec = (int)(((double)random() / INT_MAX) * max_sleep_ms);
 	tv.tv_sec = 0;
 	tv.tv_nsec = 1000000 * msec;
 	if (nanosleep(&tv, NULL) == -1) {
@@ -260,7 +260,8 @@ static void complete_tx(struct xsk_socket_info *xsk)
 }
 
 static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
-			   uint32_t len, int udp4_out, int udp6_out)
+			   uint32_t len, int udp4_out, int udp6_out,
+			   int max_sleep_ms)
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
@@ -299,7 +300,7 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 	}
 
 	// sleep randomly to scramble
-	dawdle();
+	dawdle(max_sleep_ms);
 
 	ssize_t sent_bytes;
 	if (use_ipv6) {
@@ -322,7 +323,7 @@ static bool process_packet(struct xsk_socket_info *xsk, uint64_t addr,
 }
 
 static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
-				   int udp6_out)
+				   int udp6_out, int max_sleep_ms)
 {
 	unsigned int rcvd, stock_frames, i;
 	uint32_t idx_rx = 0, idx_fq = 0;
@@ -357,7 +358,8 @@ static void handle_receive_packets(struct xsk_socket_info *xsk, int udp4_out,
 		uint64_t addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 		uint32_t len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
-		if (!process_packet(xsk, addr, len, udp4_out, udp6_out))
+		if (!process_packet(xsk, addr, len, udp4_out, udp6_out,
+				    max_sleep_ms))
 			xsk_free_umem_frame(xsk, addr);
 	}
 
@@ -384,7 +386,8 @@ static void rx_and_process(struct config *cfg,
 			if (ret <= 0 || ret > 1)
 				continue;
 		}
-		handle_receive_packets(xsk_socket, udp4_out, udp6_out);
+		handle_receive_packets(xsk_socket, udp4_out, udp6_out,
+				       cfg->max_sleep_ms);
 	}
 }
 
@@ -441,13 +444,6 @@ int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
 
 int main(int argc, char **argv)
 {
-	struct rlimit r = { RLIM_INFINITY, RLIM_INFINITY };
-
-	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
-		perror("setrlimit(RLIMIT_MEMLOCK)");
-		return 1;
-	}
-
 	int xsks_map_fd, err;
 	void *packet_buffer;
 	uint64_t packet_buffer_size;
@@ -459,6 +455,15 @@ int main(int argc, char **argv)
 	struct xsk_umem_info *umem;
 	struct xsk_socket_info *xsk_socket;
 	struct bpf_object *bpf_obj = NULL;
+
+	/* Allow unlimited locking of memory, so all memory needed for packet
+	 * buffers can be locked.
+	 */
+	if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
+		fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
+			strerror(errno));
+		exit(EXIT_FAILURE);
+	}
 
 	/* Global shutdown handler */
 	signal(SIGINT, exit_application);
@@ -511,15 +516,6 @@ int main(int argc, char **argv)
 			fprintf(stderr, "ERR: pinning maps\n");
 			return err;
 		}
-	}
-
-	/* Allow unlimited locking of memory, so all memory needed for packet
-	 * buffers can be locked.
-	 */
-	if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
-		fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
-			strerror(errno));
-		exit(EXIT_FAILURE);
 	}
 
 	/* Allocate memory for NUM_FRAMES of the default XDP frame size */
